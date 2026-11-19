@@ -202,7 +202,7 @@ char* xstrstr(const char* str, const char* sub)
 	}
 	if (!sub[j])
 	{
-		return (char*)&str[i - strlen(sub)];
+		return (char*)&str[i - lstrlenA(sub)];
 	}
 	else
 	{
