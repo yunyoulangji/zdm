@@ -15,6 +15,8 @@
 #include "shellapi.h"
 #include "commctrl.h"
 #include "psapi.h"
+#include <string.h>
+#include <wchar.h>
 
 typedef BOOL (WINAPI* pfnShowToast)(WCHAR* szTitle, WCHAR* szBody, WCHAR* szImagePath, WCHAR* szLink);
 pfnShowToast ShowToast;
@@ -1111,8 +1113,121 @@ BOOL SendWxPusher(wchar_t* uid, wchar_t* szTitle, wchar_t* szContent,wchar_t *sz
 	if (hSession) WinHttpCloseHandle(hSession);
     return TRUE;
 }
-// 通过系统代理访问值得买页面，并校验 HTTP 状态及响应长度。
-// 不保存或注入用户 Cookie；此方法仅负责公开搜索页的读取。
+// 从程序目录读取本机 Cookie 文件。Cookie 是登录凭据，只在本机读取，不写入日志。
+static BOOL GetSidecarPath(const WCHAR* fileName, WCHAR* path, DWORD cchPath)
+{
+    if (!fileName || !path || cchPath < 2)
+        return FALSE;
+    DWORD n = GetModuleFileNameW(NULL, path, cchPath);
+    if (n == 0 || n >= cchPath)
+        return FALSE;
+    WCHAR* slash = wcsrchr(path, L'\\');
+    if (!slash)
+        return FALSE;
+    slash[1] = L'\0';
+    if (lstrlenW(path) + lstrlenW(fileName) + 1 >= (int)cchPath)
+        return FALSE;
+    lstrcatW(path, fileName);
+    return TRUE;
+}
+
+static BOOL LoadSmzdmCookie(WCHAR* cookie, DWORD cchCookie)
+{
+    if (!cookie || cchCookie < 2)
+        return FALSE;
+    cookie[0] = L'\0';
+    WCHAR path[MAX_PATH] = { 0 };
+    if (!GetSidecarPath(L"SmzdmRemind.cookie", path, MAX_PATH))
+        return FALSE;
+
+    HANDLE hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    LARGE_INTEGER size = { 0 };
+    BOOL ok = GetFileSizeEx(hFile, &size) && size.QuadPart > 0 && size.QuadPart <= 32768;
+    char* bytes = ok ? new char[(size_t)size.QuadPart + 1] : NULL;
+    DWORD read = 0;
+    if (!bytes || !ReadFile(hFile, bytes, (DWORD)size.QuadPart, &read, NULL) || read == 0)
+        ok = FALSE;
+    CloseHandle(hFile);
+    if (!ok)
+    {
+        delete[] bytes;
+        return FALSE;
+    }
+    bytes[read] = '\0';
+    char* utf8 = bytes;
+    if (read >= 3 && (BYTE)bytes[0] == 0xEF && (BYTE)bytes[1] == 0xBB && (BYTE)bytes[2] == 0xBF)
+        utf8 += 3;
+    // 只读取第一行，避免把说明文字误当作请求头。
+    char* lineEnd = strpbrk(utf8, "\r\n");
+    if (lineEnd)
+        *lineEnd = '\0';
+    int converted = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, cookie, (int)cchCookie);
+    if (converted == 0)
+        converted = MultiByteToWideChar(CP_ACP, 0, utf8, -1, cookie, (int)cchCookie);
+    delete[] bytes;
+    if (converted == 0)
+    {
+        cookie[0] = L'\0';
+        return FALSE;
+    }
+
+    WCHAR* value = cookie;
+    while (*value == L' ' || *value == L'\t')
+        ++value;
+    if (_wcsnicmp(value, L"Cookie:", 7) == 0)
+        value += 7;
+    else if (_wcsnicmp(value, L"SMZDM_COOKIE=", 13) == 0)
+        value += 13;
+    while (*value == L' ' || *value == L'\t')
+        ++value;
+    WCHAR clean[8192] = { 0 };
+    lstrcpynW(clean, value, (int)cchCookie);
+    DWORD len = (DWORD)lstrlenW(clean);
+    while (len > 0 && (clean[len - 1] == L' ' || clean[len - 1] == L'\t' || clean[len - 1] == L'\r' || clean[len - 1] == L'\n'))
+        clean[--len] = L'\0';
+    lstrcpynW(cookie, clean, (int)cchCookie);
+    return cookie[0] != L'\0';
+}
+
+static void LogSmzdmRequest(const WCHAR* host, const WCHAR* path,
+                            DWORD status, DWORD error, DWORD bytes, BOOL hasCookie)
+{
+    WCHAR logPath[MAX_PATH] = { 0 };
+    if (!GetSidecarPath(L"SmzdmRemind-network.log", logPath, MAX_PATH))
+        return;
+    HANDLE hFile = CreateFileW(logPath, FILE_APPEND_DATA,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                               OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return;
+    SYSTEMTIME st = { 0 };
+    GetLocalTime(&st);
+    WCHAR line[4096] = { 0 };
+    wsprintfW(line, L"%04u-%02u-%02u %02u:%02u:%02u host=%s status=%lu error=%lu bytes=%lu cookie=%s path=%s\r\n",
+              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+              host ? host : L"", status, error, bytes,
+              hasCookie ? L"present" : L"missing", path ? path : L"");
+    int bytesNeeded = WideCharToMultiByte(CP_UTF8, 0, line, -1, NULL, 0, NULL, NULL);
+    if (bytesNeeded > 1 && bytesNeeded < 16384)
+    {
+        char* utf8 = new char[bytesNeeded];
+        if (utf8)
+        {
+            WideCharToMultiByte(CP_UTF8, 0, line, -1, utf8, bytesNeeded, NULL, NULL);
+            DWORD written = 0;
+            WriteFile(hFile, utf8, bytesNeeded - 1, &written, NULL);
+            delete[] utf8;
+        }
+    }
+    CloseHandle(hFile);
+}
+
+// 通过 WinHTTP 访问值得买搜索页。Cookie 从程序目录的 SmzdmRemind.cookie 读取；
+// 不把 Cookie 写进日志，也不要求用户把登录凭据上传给他人。
 BOOL HttpGetSmzdmPage(const WCHAR* wHost, const WCHAR* wPath,
                       char* pszOutBuffer, DWORD dwBufferSize, DWORD* pdwBytes)
 {
@@ -1123,25 +1238,31 @@ BOOL HttpGetSmzdmPage(const WCHAR* wHost, const WCHAR* wPath,
 
     pszOutBuffer[0] = '\0';
     BOOL bOk = FALSE;
+    BOOL bHasCookie = FALSE;
     HINTERNET hSession = NULL;
     HINTERNET hConnect = NULL;
     HINTERNET hRequest = NULL;
     DWORD dwStatusCode = 0;
     DWORD dwStatusSize = sizeof(dwStatusCode);
     DWORD dwTotal = 0;
+    DWORD dwError = ERROR_SUCCESS;
     DWORD dwDecompression = WINHTTP_DECOMPRESSION_FLAG_GZIP |
                             WINHTTP_DECOMPRESSION_FLAG_DEFLATE;
-    static const WCHAR szHeaders[] =
-        L"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
-        L"Accept-Language: zh-CN,zh;q=0.9,en;q=0.8\r\n"
-        L"Cache-Control: no-cache\r\n"
-        // 保留旧版搜索请求使用的公开实验 Cookie，不包含账号登录凭据。
-        L"Cookie: ssmx_ab=mxss38\r\n";
+    WCHAR szCookie[8192] = { 0 };
+    WCHAR szReferer[2048] = { 0 };
+    WCHAR szHeaders[12288] = { 0 };
+    bHasCookie = LoadSmzdmCookie(szCookie, _countof(szCookie));
 
     static const WCHAR szUserAgent[] =
         L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         L"AppleWebKit/537.36 (KHTML, like Gecko) "
         L"Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0";
+    static const WCHAR szBaseHeaders[] =
+        L"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
+        L"Accept-Language: zh-CN,zh;q=0.9,en;q=0.8\r\n"
+        L"Cache-Control: no-cache\r\n"
+        L"Pragma: no-cache\r\n"
+        L"Upgrade-Insecure-Requests: 1\r\n";
 
     // 优先使用 Windows 自动代理/PAC；旧系统不支持时回退到 WinHTTP 默认代理。
     hSession = WinHttpOpen(szUserAgent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
@@ -1150,11 +1271,12 @@ BOOL HttpGetSmzdmPage(const WCHAR* wHost, const WCHAR* wPath,
         hSession = WinHttpOpen(szUserAgent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession)
+    {
+        dwError = GetLastError();
         goto cleanup;
+    }
 
     WinHttpSetTimeouts(hSession, 10000, 10000, 20000, 20000);
-
-    // Windows 7 需要显式启用 TLS 1.2；新系统使用系统默认安全协议。
     if (rovi.dwMajorVersion == 6 && rovi.dwMinorVersion == 1)
     {
         DWORD dwProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
@@ -1164,65 +1286,105 @@ BOOL HttpGetSmzdmPage(const WCHAR* wHost, const WCHAR* wPath,
 
     hConnect = WinHttpConnect(hSession, wHost, INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (!hConnect)
+    {
+        dwError = GetLastError();
         goto cleanup;
+    }
 
+    lstrcpyW(szReferer, L"https://");
+    lstrcatW(szReferer, wHost);
+    lstrcatW(szReferer, wPath);
     hRequest = WinHttpOpenRequest(hConnect, L"GET", wPath, NULL,
-                                  L"https://www.smzdm.com/",
-                                  WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                  szReferer, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                   WINHTTP_FLAG_SECURE);
     if (!hRequest)
+    {
+        dwError = GetLastError();
         goto cleanup;
+    }
 
-    // WinHTTP 在支持的系统上自动解压 gzip/deflate；失败时仍可继续发送普通请求。
 #ifdef WINHTTP_OPTION_DECOMPRESSION
     WinHttpSetOption(hRequest, WINHTTP_OPTION_DECOMPRESSION,
                      &dwDecompression, sizeof(dwDecompression));
 #endif
 
+    lstrcpynW(szHeaders, szBaseHeaders, _countof(szHeaders));
+    if (bHasCookie)
+    {
+        lstrcatW(szHeaders, L"Cookie: ");
+        lstrcatW(szHeaders, szCookie);
+        lstrcatW(szHeaders, L"\r\n");
+    }
     if (!WinHttpAddRequestHeaders(hRequest, szHeaders, (DWORD)-1,
                                   WINHTTP_ADDREQ_FLAG_ADD))
+    {
+        dwError = GetLastError();
         goto cleanup;
+    }
 
     if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                             WINHTTP_NO_REQUEST_DATA, 0, 0, 0))
+    {
+        dwError = GetLastError();
         goto cleanup;
+    }
     if (!WinHttpReceiveResponse(hRequest, NULL))
+    {
+        dwError = GetLastError();
         goto cleanup;
+    }
 
     if (!WinHttpQueryHeaders(hRequest,
                              WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                              WINHTTP_HEADER_NAME_BY_INDEX,
                              &dwStatusCode, &dwStatusSize,
                              WINHTTP_NO_HEADER_INDEX))
+    {
+        dwError = GetLastError();
         goto cleanup;
+    }
     if (dwStatusCode < 200 || dwStatusCode >= 300)
+    {
+        dwError = ERROR_WINHTTP_INVALID_SERVER_RESPONSE;
         goto cleanup;
+    }
 
     for (;;)
     {
         DWORD dwAvailable = 0;
         if (!WinHttpQueryDataAvailable(hRequest, &dwAvailable))
+        {
+            dwError = GetLastError();
             goto cleanup;
+        }
         if (dwAvailable == 0)
             break;
-
         DWORD dwCapacity = dwBufferSize - 1 - dwTotal;
         if (dwCapacity == 0)
-            goto cleanup; // 超出上限时不解析不完整页面
-
+        {
+            dwError = ERROR_INSUFFICIENT_BUFFER;
+            goto cleanup;
+        }
         DWORD dwToRead = (dwAvailable < dwCapacity) ? dwAvailable : dwCapacity;
         DWORD dwRead = 0;
         if (!WinHttpReadData(hRequest, pszOutBuffer + dwTotal, dwToRead, &dwRead))
+        {
+            dwError = GetLastError();
             goto cleanup;
+        }
         if (dwRead == 0)
+        {
+            dwError = ERROR_HANDLE_EOF;
             goto cleanup;
+        }
         dwTotal += dwRead;
         pszOutBuffer[dwTotal] = '\0';
     }
-
     if (dwTotal == 0)
+    {
+        dwError = ERROR_NO_DATA;
         goto cleanup;
-
+    }
     if (pdwBytes)
         *pdwBytes = dwTotal;
     bOk = TRUE;
@@ -1231,6 +1393,8 @@ cleanup:
     if (hRequest) WinHttpCloseHandle(hRequest);
     if (hConnect) WinHttpCloseHandle(hConnect);
     if (hSession) WinHttpCloseHandle(hSession);
+    LogSmzdmRequest(wHost, wPath, dwStatusCode, bOk ? ERROR_SUCCESS : dwError,
+                    dwTotal, bHasCookie);
     return bOk;
 }
 
@@ -1539,6 +1703,15 @@ BOOL SearchSMZDM(REMINDITEM* lpRI, BOOL bList, int iPage, BOOL bSmzdmSearch)
         ? L"search.smzdm.com" : L"zhiyou.smzdm.com";
     BOOL bResults = HttpGetSmzdmPage(wHost, szGet, pszOutBuffer,
                                      NETPAGESIZE + 1, NULL);
+    if (!bResults && bList && iPage == 0)
+    {
+        MessageBoxW(hMain,
+            L"搜索请求没有成功。新版什么值得买可能要求登录 Cookie。\n\n"
+            L"请查看程序目录中的 SmzdmRemind-network.log。\n"
+            L"如需使用 Cookie，请按压缩包中的《Cookie本机配置说明.txt》操作。\n"
+            L"注意：Cookie 是账号凭据，不要发给任何人。",
+            L"什么值得买搜索失败", MB_OK | MB_ICONWARNING);
+    }
     WCHAR* szOutBuffer = NULL;
     if (bResults)
     {

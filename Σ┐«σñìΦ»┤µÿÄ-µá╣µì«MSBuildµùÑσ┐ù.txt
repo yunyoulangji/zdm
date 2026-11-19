@@ -1,0 +1,11 @@
+SmzdmRemind 1.1.8.8 x64 编译错误修复说明
+
+根据用户提供的 MSBuild-Diagnostics.zip（2026-11-19）定位：
+1. 唯一阻止 EXE 链接的错误为 LNK2019：unresolved external symbol strlen。
+2. framework.h 在 Release 下通过 /NODEFAULTLIB 禁止默认 C/C++ 运行库，但工程仍调用 strlen，导致最终链接失败。
+3. 将窄字符 strlen 调用替换为 Windows API lstrlenA。该 API 由 Kernel32 提供，项目原本就链接 Kernel32，不需要重新引入 CRT。
+4. 修正线程参数中 int/UINT 与 PVOID 的直接转换，改用 UINT_PTR，避免 x64 指针宽度警告和截断风险。
+
+本修复仅处理编译日志中已确认的链接错误及两处 x64 指针转换问题。其它数值转换警告没有被当作构建失败原因，也未擅自大范围改动业务逻辑。
+
+下一步：将本压缩包内容更新到 GitHub 仓库，重新运行 Actions 中的 Windows x64 构建工作流。成功时下载 SmzdmRemind-1.1.8.8-x64；若仍失败，下载 MSBuild-Diagnostics 并继续检查新的首个 error。

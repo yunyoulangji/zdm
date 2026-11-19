@@ -1,0 +1,24 @@
+SmzdmRemind 1.1.8.8 x64 第二轮编译错误修复说明
+
+根据用户于 2026-11-19 上传的 msbuild.log / msbuild.binlog：
+
+一、这次失败的直接原因
+- MSBuild 使用 Release|x64，已正常进入主程序 SmzdmRemind.vcxproj 的 ClCompile 阶段。
+- 当前日志没有出现 LNK2019；此次构建在编译阶段就失败了。
+- 日志共记录 58 条编译错误，其中主要根因是 C3861：找不到标识符 llstrlenA。
+- 上一版修改错误地把若干宽字符字符串长度调用写成 llstrlenA。该标识符并非 Win32 API，且这些参数实际都是 WCHAR / LPCWSTR。
+- C7732 以及部分 RegSetValueExW、WriteFile 参数个数诊断是围绕上述未识别表达式发生的连带解析错误。
+
+二、本次修正
+- 将 25 处 llstrlenA(...) 改成 lstrlenW(...)，用于 WCHAR / LPCWSTR 字符串。
+- 保留 lstrlenA(...) 用于 char / LPCSTR 字符串，避免重新引入 Release /NODEFAULTLIB 下的 CRT strlen 链接依赖。
+- WinHttpAddRequestHeaders、WideCharToMultiByte 等宽字符长度参数使用 lstrlenW 返回的字符数。
+- WriteFile 写出 WCHAR 缓冲区时，按 lstrlenW(...) * sizeof(WCHAR) 计算字节数。
+- RegSetValueEx 显式采用六参数形式，并让 REG_SZ 的字节数包含结尾 WCHAR NUL。
+- 保留上一版对线程参数指针宽度的 UINT_PTR 调整。
+
+三、验证边界
+- 已完成源文件静态检查：不再存在 llstrlenA；窄字符 API 调用使用 lstrlenA，宽字符 API 调用使用 lstrlenW。
+- 已检查 ZIP 文件结构及项目文件完整性。
+- 当前执行环境不能运行 Windows MSVC / Windows SDK，因此尚未在本环境完成 Windows 原生编译。请将此包更新到 GitHub 后重新运行 Release|x64 工作流。
+- 若工作流仍失败，请下载新一轮 MSBuild-Diagnostics 中的 msbuild.log 与 msbuild.binlog；后续应以新的首个 compiler/linker error 为准。

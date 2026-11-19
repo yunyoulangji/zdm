@@ -1,0 +1,22 @@
+SmzdmRemind 搜索 / 关键词监控 Cookie 配置说明
+
+为什么需要 Cookie：
+当前什么值得买搜索页可能要求有效登录 Cookie。程序原先只发送了一个公开实验参数，无法代替真实登录状态。手动搜索和右下角关键词监控都使用同一数据请求函数，因此会一起失效。
+
+配置步骤（仅在你自己的电脑上操作）：
+1. 用 Edge 或 Chrome 打开 https://www.smzdm.com/ 并登录自己的什么值得买账号。
+2. 新开一个标签页，访问：https://search.smzdm.com/?c=home&s=test&order=time&v=a&mx_v=a
+3. 按 F12 打开开发者工具，切换到“网络 / Network”，刷新页面。
+4. 在请求列表中选中 search.smzdm.com 的主文档请求，找到“请求标头 / Request Headers”里的 Cookie。
+5. 只复制 Cookie 冒号后面的整段值，不要复制“Cookie:”这个字段名。
+6. 在 SmzdmRemind.exe 同一目录新建纯文本文件，文件名必须为：SmzdmRemind.cookie
+7. 把刚才复制的 Cookie 整段粘贴为文件第一行，保存后重新启动程序。
+
+重要安全提示：
+- Cookie 等同于登录凭据。任何人拿到它都可能使用你的登录会话。
+- 不要把 SmzdmRemind.cookie 上传到 GitHub、聊天窗口或发给任何人。
+- 我们不会在程序日志中写入 Cookie 内容。日志只记录请求网址、HTTP 状态、错误码、响应字节数，以及 Cookie 是否存在。
+- Cookie 失效后需要按上述步骤重新复制。
+
+诊断：
+程序会在 EXE 同目录生成 SmzdmRemind-network.log。若已配置 Cookie 仍然失败，请把日志发给我；日志不会包含 Cookie 内容。
