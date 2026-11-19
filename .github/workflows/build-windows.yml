@@ -1,0 +1,108 @@
+name: SmzdmRemind Windows x64（诊断构建）
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Release x64
+    runs-on: windows-2022
+    steps:
+      - name: 下载源码
+        uses: actions/checkout@v7
+
+      - name: 准备 MSBuild
+        uses: microsoft/setup-msbuild@v3
+
+      - name: 检查工程文件
+        shell: pwsh
+        run: |
+          Write-Host "工作目录：$PWD"
+          if (-not (Test-Path .\SmzdmRemind.sln)) {
+            Write-Error "找不到 SmzdmRemind.sln。请确认上传的是源码工程根目录，而不只是 ZIP 或 EXE。"
+            Get-ChildItem -Force
+            exit 1
+          }
+          Write-Host "找到解决方案：SmzdmRemind.sln"
+          Get-ChildItem -Recurse -Include *.vcxproj | Select-Object -ExpandProperty FullName
+
+      - name: 编译 Release x64（保存详细日志）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & msbuild .\SmzdmRemind.sln /m /t:Build /p:Configuration=Release /p:Platform=x64 /p:WindowsTargetPlatformVersion=10.0 /v:normal '/flp:logfile=msbuild.log;verbosity=diagnostic' '/bl:msbuild.binlog'
+          $buildExitCode = $LASTEXITCODE
+          if ($buildExitCode -ne 0) {
+            Write-Host "::error::MSBuild 编译失败，退出代码：$buildExitCode"
+            if (Test-Path .\msbuild.log) {
+              Write-Host "以下是日志最后 250 行："
+              Get-Content .\msbuild.log -Tail 250
+            }
+            exit $buildExitCode
+          }
+
+      - name: 整理并验证 x64 成品
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path . -Filter 'SmzdmRemind.exe' -File -Recurse |
+            Where-Object { $_.FullName -notmatch '[\\/](build-out|编译完成)[\\/]' } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          $dll = Get-ChildItem -Path . -Filter 'WinToast.dll' -File -Recurse |
+            Where-Object { $_.FullName -notmatch '[\\/](build-out|编译完成)[\\/]' } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+
+          if (-not $exe) { throw '编译结束但找不到 SmzdmRemind.exe。请查看 MSBuild 日志。' }
+          if (-not $dll) { throw '编译结束但找不到 WinToast.dll。请查看 MSBuild 日志。' }
+
+          function Assert-X64Pe([string]$path) {
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            if ($bytes.Length -lt 256 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+              throw "不是有效的 Windows PE 文件：$path"
+            }
+            $peOffset = [System.BitConverter]::ToInt32($bytes, 0x3C)
+            if ($peOffset -lt 0 -or ($peOffset + 6) -gt $bytes.Length) {
+              throw "PE 文件头损坏：$path"
+            }
+            $machine = [System.BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            if ($machine -ne 0x8664) {
+              throw "文件不是 x64（AMD64），Machine=0x$('{0:X4}' -f $machine)：$path"
+            }
+          }
+
+          Assert-X64Pe $exe.FullName
+          Assert-X64Pe $dll.FullName
+
+          New-Item -ItemType Directory -Force -Path build-out | Out-Null
+          Copy-Item $exe.FullName build-out\SmzdmRemind.exe -Force
+          Copy-Item $dll.FullName build-out\WinToast.dll -Force
+          @'
+          使用方法：将 SmzdmRemind.exe 和 WinToast.dll 放在同一个文件夹中，然后双击 SmzdmRemind.exe。
+          本压缩包为 Windows x64 版本。
+          '@ | Set-Content -Encoding UTF8 build-out\使用说明.txt
+
+          Compress-Archive -Path build-out\* -DestinationPath SmzdmRemind-1.1.8.8-x64.zip -Force
+          Write-Host "已生成：SmzdmRemind-1.1.8.8-x64.zip"
+
+      - name: 上传 x64 成品
+        uses: actions/upload-artifact@v7
+        with:
+          name: SmzdmRemind-1.1.8.8-x64
+          path: SmzdmRemind-1.1.8.8-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 即使失败也上传编译诊断日志
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: MSBuild-Diagnostics
+          path: |
+            msbuild.log
+            msbuild.binlog
+          if-no-files-found: warn
+          retention-days: 7
