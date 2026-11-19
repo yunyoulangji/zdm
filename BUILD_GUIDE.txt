@@ -1,0 +1,29 @@
+SmzdmRemind 1.1.8.8 修复版：小白编译说明
+
+你不需要修改 C++ 代码。
+
+方式一：电脑已经安装 Visual Studio 2022
+1. 双击 build.bat。
+2. 等待黑色窗口完成编译。
+3. 成功后会自动打开“编译完成”文件夹。
+4. 使用时必须把 SmzdmRemind.exe 和 WinToast.dll 放在一起，再双击 EXE。
+
+如果提示缺少编译工具：
+需要安装 Visual Studio 2022 的“使用 C++ 的桌面开发”工作负载和 Windows 10 SDK。
+也可以使用下面的 GitHub 云端编译，不必在自己电脑安装 Visual Studio。
+
+方式二：GitHub 云端编译（无需安装 Visual Studio）
+1. 解压本压缩包。
+2. 登录 GitHub，打开你用来编译的仓库。
+3. 将解压后文件夹内的全部文件和文件夹上传到仓库根目录，并覆盖同名文件。请保留 .github/workflows/build-windows.yml 这个隐藏目录及其中的文件。
+4. 打开仓库顶部的 Actions。
+5. 在左侧选择“SmzdmRemind Windows x64（诊断构建）”。
+6. 点击 Run workflow，再点击绿色的 Run workflow。
+7. 成功时，在本次运行页面的 Artifacts 区域下载“SmzdmRemind-1.1.8.8-x64”，解压后将 SmzdmRemind.exe 和 WinToast.dll 放在同一个文件夹。
+8. 如果失败，在 Artifacts 区域下载“MSBuild-Diagnostics”，将其中的 msbuild.log 发给协助你排错的人。
+
+注意：
+- Node.js 20 deprecation 是 GitHub Actions 的运行环境弃用警告，不是 C++ 编译错误本身。
+- 如果日志出现 “No files were found...”，通常是编译没有生成程序，或者上传步骤使用了错误的路径。
+- 如果 MSBuild 仍然退出代码 1，必须根据 msbuild.log 中第一条 Cxxxx、LNKxxxx 或 MSBxxxx 错误继续修复。
+- 本工程尚未在真实 Windows 电脑完成最终编译和运行验收。云端编译成功只代表成功生成文件，不等于网站请求、托盘通知等所有功能均已通过实机测试。
